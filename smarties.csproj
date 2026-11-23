@@ -5,6 +5,19 @@
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+
+    <!-- Self-contained single-file for execute-assembly / in-memory loading -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <PublishTrimmed>false</PublishTrimmed>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+
+    <!-- Suppress platform compat warnings (Windows-only tool) -->
+    <NoWarn>CA1416</NoWarn>
+
+    <!-- Assembly metadata -->
+    <AssemblyName>smarties</AssemblyName>
+    <RootNamespace>Smarties</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>

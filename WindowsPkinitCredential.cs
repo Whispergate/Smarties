@@ -77,7 +77,7 @@ public sealed class WindowsPkinitCredential : KerberosAsymmetricCredential
         }
 
         // Step 4: Compute SHA-1( DER( KDC-REQ-BODY ) ) 
-        // We always overwrite — even if already set — because the base
+        // We always overwrite - even if already set - because the base
         // class may have computed the checksum over a stale or differently-encoded
         // body snapshot.  Computing here gives us the most up-to-date body bytes.
         byte[] bodyDer = req.Body.Encode().ToArray();
@@ -126,7 +126,7 @@ public sealed class WindowsPkinitCredential : KerberosAsymmetricCredential
         var verifyCms = new SignedCms();
         verifyCms.Decode(newCmsBytes);
         var verifyPack = DecodeAuthPack(verifyCms.ContentInfo.Content);
-        Console.WriteLine($"[DBG] paChecksum in re-signed CMS: {(verifyPack.PKAuthenticator.PaChecksum.HasValue ? Convert.ToHexString(verifyPack.PKAuthenticator.PaChecksum.Value.ToArray()) : "<MISSING — CMS lost it>")}");
+        Console.WriteLine($"[DBG] paChecksum in re-signed CMS: {(verifyPack.PKAuthenticator.PaChecksum.HasValue ? Convert.ToHexString(verifyPack.PKAuthenticator.PaChecksum.Value.ToArray()) : "<MISSING - CMS lost it>")}");
 
         // Step 8: Re-wrap and replace padata
         byte[] newPaValue = WrapCmsInPaValue(newCmsBytes);
@@ -149,7 +149,7 @@ public sealed class WindowsPkinitCredential : KerberosAsymmetricCredential
         var seqReader = outerReader.ReadSequence();
         ReadOnlyMemory<byte> tag0Tlv = seqReader.ReadEncodedValue();
 
-        // tag0Tlv = [0] PRIMITIVE TLV — strip tag+length to get value bytes.
+        // tag0Tlv = [0] PRIMITIVE TLV - strip tag+length to get value bytes.
         int offset = 1; // skip tag byte
         byte firstLen = tag0Tlv.Span[offset];
         offset += (firstLen & 0x80) == 0

@@ -1,0 +1,134 @@
+name: Build & Release Smarties
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-dotnet:
+    name: Build .NET Assembly
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build self-contained (win-x64)
+        run: |
+          dotnet publish -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:PublishTrimmed=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -o artifacts/dotnet
+
+      - name: Upload .NET artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: smarties-dotnet-win-x64
+          path: artifacts/dotnet/smarties.exe
+
+  build-bof:
+    name: Build BOF (x64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mingw cross-compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Build BOF
+        working-directory: bof
+        run: make
+
+      - name: Verify COFF object
+        working-directory: bof
+        run: |
+          file smarties.x64.o
+          # Verify 'go' symbol exists (BOF entry point)
+          x86_64-w64-mingw32-objdump -t smarties.x64.o | grep -q ' go$' && echo "[+] Entry point 'go' found" || (echo "[-] Missing 'go' symbol" && exit 1)
+
+      - name: Upload BOF artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: smarties-bof-x64
+          path: bof/smarties.x64.o
+
+  release:
+    name: Create Release
+    needs: [build-dotnet, build-bof]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Package release assets
+        run: |
+          mkdir -p release
+
+          # .NET assembly
+          cp release-artifacts/smarties-dotnet-win-x64/smarties.exe release/smarties-dotnet-win-x64.exe
+
+          # BOF object
+          cp release-artifacts/smarties-bof-x64/smarties.x64.o release/smarties.x64.o
+
+          # Create a zip with both + README
+          cd release
+          zip smarties-${GITHUB_REF_NAME}.zip \
+            smarties-dotnet-win-x64.exe \
+            smarties.x64.o
+
+          # SHA256 checksums
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release/smarties-dotnet-win-x64.exe
+            release/smarties.x64.o
+            release/smarties-${{ github.ref_name }}.zip
+            release/SHA256SUMS.txt
+          body: |
+            ## Smarties ${{ github.ref_name }}
+
+            Smartcard TGT phishing tool for authorized red team engagements.
+
+            ### Assets
+
+            | File | Description |
+            |------|-------------|
+            | `smarties-dotnet-win-x64.exe` | Self-contained .NET 8 assembly (use with `execute-assembly`) |
+            | `smarties.x64.o` | BOF for EmeraldStrike/Cobalt Strike (`inline_execute` / `bof_exec`) |
+            | `smarties-${{ github.ref_name }}.zip` | Both artifacts in one archive |
+
+            ### .NET Usage
+            ```
+            execute-assembly smarties-dotnet-win-x64.exe phish --output C:\Windows\Temp\tgt.kirbi --auto
+            ```
+
+            ### BOF Usage (EmeraldStrike)
+            ```
+            inline_execute smarties.x64.o phish C:\Windows\Temp\tgt.kirbi
+            ```
+
+            ### Converting the .kirbi
+            ```bash
+            ticketConverter.py tgt.kirbi tgt.ccache
+            export KRB5CCNAME=tgt.ccache
+            ```
