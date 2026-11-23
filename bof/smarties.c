@@ -20,15 +20,10 @@
  * For authorized red team / training use only.
  */
 
+#define SECURITY_WIN32
 #include <windows.h>
 #include <wincrypt.h>
 #include <sspi.h>
-
-/* Must come before ntsecapi.h to avoid redefinition conflicts */
-#ifndef _NTDEF_
-typedef LONG NTSTATUS;
-#endif
-
 #include <ntsecapi.h>
 #include <winhttp.h>
 #include "beacon.h"
@@ -117,83 +112,34 @@ typedef LONG NTSTATUS;
 #define CERT_KEY_PROV_INFO_PROP_ID     2
 #define CERT_SHA1_HASH_PROP_ID         3
 #define CERT_NAME_SIMPLE_DISPLAY_TYPE  4
+#ifndef CERT_NAME_UPN_TYPE
 #define CERT_NAME_UPN_TYPE             8
+#endif
 
 #define ISC_REQ_DELEGATE               0x00000001
 #define ISC_REQ_MUTUAL_AUTH            0x00000002
 #define ISC_REQ_ALLOCATE_MEMORY        0x00000100
 
+#ifndef KerbRetrieveEncodedTicketMessage
 #define KerbRetrieveEncodedTicketMessage  8
+#endif
 #define CertCredential 1
 
+#ifndef KERB_ETYPE_DEFAULT
 #define KERB_ETYPE_DEFAULT             0
+#endif
+#ifndef KERB_RETRIEVE_TICKET_AS_KERB_CRED
 #define KERB_RETRIEVE_TICKET_AS_KERB_CRED 0x8
+#endif
 
 /* ================================================================
- *  LSA / Kerberos structures (not in mingw headers)
+ *  Structures not provided by mingw ntsecapi.h
  * ================================================================ */
-
-typedef struct _LSA_UNICODE_STRING_MANUAL {
-    USHORT Length;
-    USHORT MaximumLength;
-    PWSTR  Buffer;
-} LSA_UNICODE_STRING_MANUAL;
-
-typedef struct _LSA_STRING_MANUAL {
-    USHORT Length;
-    USHORT MaximumLength;
-    PCHAR  Buffer;
-} LSA_STRING_MANUAL;
 
 typedef struct _CERT_CREDENTIAL_INFO {
     ULONG cbSize;
     UCHAR rgbHashOfCert[20];
 } CERT_CREDENTIAL_INFO;
-
-typedef struct _KERB_RETRIEVE_TKT_REQUEST {
-    ULONG                    MessageType;
-    LUID                     LogonId;
-    LSA_UNICODE_STRING_MANUAL TargetName;
-    ULONG                    TicketFlags;
-    ULONG                    CacheOptions;
-    LONG                     EncryptionType;
-    SecHandle                CredentialsHandle;
-} KERB_RETRIEVE_TKT_REQUEST;
-
-typedef struct _KERB_CRYPTO_KEY {
-    LONG   KeyType;
-    ULONG  Length;
-    PUCHAR Value;
-} KERB_CRYPTO_KEY;
-
-typedef struct _KERB_EXTERNAL_NAME {
-    SHORT  NameType;
-    USHORT NameCount;
-    LSA_UNICODE_STRING_MANUAL Names[1];
-} KERB_EXTERNAL_NAME;
-
-typedef struct _KERB_EXTERNAL_TICKET {
-    KERB_EXTERNAL_NAME *ServiceName;
-    KERB_EXTERNAL_NAME *TargetName;
-    KERB_EXTERNAL_NAME *ClientName;
-    LSA_UNICODE_STRING_MANUAL DomainName;
-    LSA_UNICODE_STRING_MANUAL TargetDomainName;
-    LSA_UNICODE_STRING_MANUAL AltTargetDomainName;
-    KERB_CRYPTO_KEY    SessionKey;
-    ULONG              TicketFlags;
-    ULONG              Flags;
-    LARGE_INTEGER      KeyExpirationTime;
-    LARGE_INTEGER      StartTime;
-    LARGE_INTEGER      EndTime;
-    LARGE_INTEGER      RenewUntil;
-    LARGE_INTEGER      TimeSkew;
-    ULONG              EncodedTicketSize;
-    PUCHAR             EncodedTicket;
-} KERB_EXTERNAL_TICKET;
-
-typedef struct _KERB_RETRIEVE_TKT_RESPONSE {
-    KERB_EXTERNAL_TICKET Ticket;
-} KERB_RETRIEVE_TKT_RESPONSE;
 
 /* ================================================================
  *  HELPER: Heap allocator wrappers
@@ -406,7 +352,7 @@ static void do_enum(void) {
  * ================================================================ */
 
 static BOOL getKerbPackageId(HANDLE hLsa, PULONG pPackageId) {
-    LSA_STRING_MANUAL pkgName;
+    LSA_STRING pkgName;
     char kerbName[] = "Kerberos";
     pkgName.Buffer = kerbName;
     pkgName.Length = (USHORT)strlen(kerbName);
